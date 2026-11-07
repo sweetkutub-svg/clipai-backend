@@ -38,11 +38,13 @@ if shutil.which("ffmpeg") is None:
 # Cookies setup (optional, from YT_COOKIES env var)
 yt_cookies_content = os.getenv("YT_COOKIES")
 COOKIES_PATH = Path(__file__).parent / "cookies.txt"
-if yt_cookies_content:
+if COOKIES_PATH.exists() and not yt_cookies_content:
+    print("[Cookie] cookies.txt found")
+elif yt_cookies_content:
     COOKIES_PATH.write_text(yt_cookies_content)
-    print(f"[Cookie] cookies.txt write ho gaya ✅ | Path: {COOKIES_PATH} | Exists: {COOKIES_PATH.exists()}")
+    print(f"[Cookie] cookies.txt written ✅ | Path: {COOKIES_PATH} | Exists: {COOKIES_PATH.exists()}")
 else:
-    print("[Cookie] ⚠️ YT_COOKIES env variable nahi mila — bot detection ho sakta hai")
+    print("[Cookie] ⚠️ YT_COOKIES env variable not found — bot detection may occur")
 
 app = FastAPI(title="ClipAI Backend")
 
@@ -93,7 +95,7 @@ if not SUPABASE_SERVICE_KEY: raise RuntimeError("SUPABASE_SERVICE_KEY missing!")
 groq_client = Groq(api_key=GROQ_API_KEY)
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_KEY)
 
-# Supabase HTTP/2 "Server disconnected" fix: purani connection tootne par ek naya try
+# Supabase HTTP/2 "Server disconnected" fix: retry on a fresh connection when the old one drops
 import httpx
 _orig_send = httpx.Client.send
 def _send_retry(self, request, *args, **kwargs):
@@ -158,7 +160,7 @@ def get_font_path() -> str:
                 return line
     except Exception:
         pass
-    print("[Font] ⚠️ Koi font nahi mila — captions nahi dikhenge")
+    print("[Font] ⚠️ No font found — captions will not be shown")
     return ""
 
 FONT_PATH = get_font_path()
@@ -190,7 +192,7 @@ def get_current_user(authorization: str = None):
 
 def require_user(authorization: str = None):
     user = get_current_user(authorization)
-    if not user: raise HTTPException(status_code=401, detail="Login karo pehle!")
+    if not user: raise HTTPException(status_code=401, detail="Please log in first!")
     return user
 
 # ── B2 ────────────────────────────────────────────────────────
@@ -273,7 +275,7 @@ def create_clips(req: ClipRequest, background_tasks: BackgroundTasks, authorizat
     user = require_user(authorization)
     existing = supabase.table("clips").select("id").eq("user_id", user.id).execute()
     if len(existing.data) >= MAX_CLIPS:
-        raise HTTPException(status_code=429, detail=f"Max {MAX_CLIPS} clips! Pehle kuch delete ya upload karo.")
+        raise HTTPException(status_code=429, detail=f"Max {MAX_CLIPS} clips! Please delete or upload some first.")
     job_id = str(uuid.uuid4())
     jobs[job_id] = {"status": "queued", "step": "Starting...", "progress": 0, "clips": [], "error": None, "user_id": user.id}
     background_tasks.add_task(process_video, job_id, req, user.id)
@@ -321,7 +323,7 @@ async def delete_all_my_clips_beacon(request: Request):
 def delete_clip(clip_id: str, authorization: Optional[str] = Header(None)):
     user = require_user(authorization)
     clip = supabase.table("clips").select("*").eq("id", clip_id).eq("user_id", user.id).execute()
-    if not clip.data: raise HTTPException(404, "Clip nahi mili!")
+    if not clip.data: raise HTTPException(404, "Clip not found!")
     if clip.data[0].get("b2_key"): delete_from_b2(clip.data[0]["b2_key"])
     supabase.table("clips").delete().eq("id", clip_id).execute()
     return {"deleted": True}
@@ -408,7 +410,7 @@ Return ONLY raw JSON: {{"title":"...","description":"..."}}"""
     try:
         data = json.loads(raw)
         return {"title": data.get("title",""), "description": data.get("description","")}
-    except: raise HTTPException(500, "AI ne invalid response diya")
+    except: raise HTTPException(500, "AI returned an invalid response")
 
 # ---- Facebook (Page Reels) ----
 FB_APP_ID     = os.getenv("FACEBOOK_APP_ID")
@@ -424,7 +426,7 @@ def load_fb(user_id: str):
 @app.get("/auth/facebook/url")
 def fb_auth_url(authorization: Optional[str] = Header(None)):
     user = require_user(authorization)
-    if not FB_APP_ID: raise HTTPException(500, "FACEBOOK_APP_ID .env me nahi hai")
+    if not FB_APP_ID: raise HTTPException(500, "FACEBOOK_APP_ID is missing in .env")
     from urllib.parse import urlencode
     q = urlencode({"client_id": FB_APP_ID, "redirect_uri": FB_REDIRECT, "state": sign_state(user.id),
                    "scope": FB_SCOPES, "response_type": "code"})
@@ -469,10 +471,10 @@ def fb_disconnect(authorization: Optional[str] = Header(None)):
 def upload_to_facebook_route(req: UploadRequest, authorization: Optional[str] = Header(None)):
     user = require_user(authorization)
     fb = load_fb(user.id)
-    if not fb: raise HTTPException(401, "Facebook connect karo pehle!")
+    if not fb: raise HTTPException(401, "Please connect Facebook first!")
     temp_path = str(TEMP_DIR / f"fbup_{uuid.uuid4()}.mp4")
     try: b2.download_file(Bucket=B2_BUCKET_NAME, Key=req.b2_key, Filename=temp_path)
-    except Exception as e: raise HTTPException(404, f"Clip nahi mili B2 pe: {e}")
+    except Exception as e: raise HTTPException(404, f"Clip not found on B2: {e}")
     try:
         g, tok = f"https://graph.facebook.com/{FB_VER}/{fb['page_id']}/video_reels", fb["page_token"]
         s = requests.post(g, data={"upload_phase": "start", "access_token": tok}, timeout=60).json()
@@ -493,7 +495,7 @@ def upload_to_facebook_route(req: UploadRequest, authorization: Optional[str] = 
             except Exception as e: print(f"[Upload] DB delete failed: {e}")
         return {"success": True, "deleted": _gone, "video_id": s["video_id"], "url": f"https://www.facebook.com/reel/{s['video_id']}"}
     except Exception as e:
-        raise HTTPException(500, f"Facebook upload fail: {e} (Reel 3-60 sec ki honi chahiye)")
+        raise HTTPException(500, f"Facebook upload failed: {e} (Reel must be 3-60 seconds long)")
     finally:
         try: Path(temp_path).unlink()
         except Exception: pass
@@ -512,7 +514,7 @@ def load_fb(user_id: str):
 @app.get("/auth/facebook/url")
 def fb_auth_url(authorization: Optional[str] = Header(None)):
     user = require_user(authorization)
-    if not FB_APP_ID: raise HTTPException(500, "FACEBOOK_APP_ID .env me nahi hai")
+    if not FB_APP_ID: raise HTTPException(500, "FACEBOOK_APP_ID is missing in .env")
     from urllib.parse import urlencode
     q = urlencode({"client_id": FB_APP_ID, "redirect_uri": FB_REDIRECT, "state": sign_state(user.id),
                    "scope": FB_SCOPES, "response_type": "code"})
@@ -557,10 +559,10 @@ def fb_disconnect(authorization: Optional[str] = Header(None)):
 def upload_to_facebook_route(req: UploadRequest, authorization: Optional[str] = Header(None)):
     user = require_user(authorization)
     fb = load_fb(user.id)
-    if not fb: raise HTTPException(401, "Facebook connect karo pehle!")
+    if not fb: raise HTTPException(401, "Please connect Facebook first!")
     temp_path = str(TEMP_DIR / f"fbup_{uuid.uuid4()}.mp4")
     try: b2.download_file(Bucket=B2_BUCKET_NAME, Key=req.b2_key, Filename=temp_path)
-    except Exception as e: raise HTTPException(404, f"Clip nahi mili B2 pe: {e}")
+    except Exception as e: raise HTTPException(404, f"Clip not found on B2: {e}")
     try:
         g, tok = f"https://graph.facebook.com/{FB_VER}/{fb['page_id']}/video_reels", fb["page_token"]
         s = requests.post(g, data={"upload_phase": "start", "access_token": tok}, timeout=60).json()
@@ -575,13 +577,13 @@ def upload_to_facebook_route(req: UploadRequest, authorization: Optional[str] = 
         if not d.get("success"): raise Exception(d)
         return {"success": True, "video_id": s["video_id"], "url": f"https://www.facebook.com/reel/{s['video_id']}"}
     except Exception as e:
-        raise HTTPException(500, f"Facebook upload fail: {e} (Reel 3-60 sec ki honi chahiye)")
+        raise HTTPException(500, f"Facebook upload failed: {e} (Reel must be 3-60 seconds long)")
     finally:
         try: Path(temp_path).unlink()
         except Exception: pass
 
 def fb_wait_ready(video_id, tok, tries=20):
-    """Facebook Reel process hone tak ruko; error ho to batao."""
+    """Wait until the Facebook Reel finishes processing; report an error if it fails."""
     for _ in range(tries):
         try:
             st = requests.get(f"https://graph.facebook.com/{FB_VER}/{video_id}", timeout=30,
@@ -590,7 +592,7 @@ def fb_wait_ready(video_id, tok, tries=20):
             return
         if st.get("video_status") == "ready": return
         if st.get("video_status") == "error" or any(isinstance(v, dict) and v.get("status") == "error" for v in st.values()):
-            raise Exception(f"Facebook ne video reject ki: {st}")
+            raise Exception(f"Facebook rejected the video: {st}")
         time.sleep(3)
 
 @app.post("/upload/all")
@@ -600,7 +602,7 @@ def upload_to_all_route(req: UploadRequest, authorization: Optional[str] = Heade
     if load_fb(user.id): targets.append(("facebook", upload_to_facebook_route))
     if get_yt_credentials(user.id): targets.append(("youtube", upload_to_youtube_route))
     if req.platforms is not None: targets = [t for t in targets if t[0] in req.platforms]
-    if not targets: raise HTTPException(401, "Koi platform connected nahi hai!")
+    if not targets: raise HTTPException(401, "No platform is connected!")
     req.keep_clip = True
     results, ok_all = {}, True
     for name, fn in targets:
@@ -614,7 +616,7 @@ def upload_to_all_route(req: UploadRequest, authorization: Optional[str] = Heade
     return {"success": ok_all, "deleted": any(isinstance(r, dict) and r.get("deleted") for r in results.values()), "results": results}
 
 def finish_clip(user_id, req, platform):
-    """Platform ko 'uploaded' mark karo; clip tabhi delete jab sab connected platform par ho jaye."""
+    """Mark the platform as 'uploaded'; delete the clip only once it is uploaded to every connected platform."""
     try:
         r = supabase.table("clips").select("uploaded_to").eq("id", req.clip_db_id).execute()
         done = list((r.data[0].get("uploaded_to") if r.data else None) or [])
@@ -647,19 +649,19 @@ Return ONLY raw JSON: {{"title":"...","description":"..."}}"""
     try:
         data = json.loads(raw)
         return {"title": data.get("title",""), "description": data.get("description","")}
-    except: raise HTTPException(500, "AI ne invalid response diya")
+    except: raise HTTPException(500, "AI returned an invalid response")
 
 # ── YouTube Upload ─────────────────────────────────────────────
 @app.post("/upload/youtube")
 def upload_to_youtube_route(req: UploadRequest, authorization: Optional[str] = Header(None)):
     user  = require_user(authorization)
     creds = get_yt_credentials(user.id)
-    if not creds: raise HTTPException(401, "YouTube connect karo pehle!")
+    if not creds: raise HTTPException(401, "Please connect YouTube first!")
     temp_path = str(TEMP_DIR / f"upload_{uuid.uuid4()}.mp4")
     try:
         b2.download_file(Bucket=B2_BUCKET_NAME, Key=req.b2_key, Filename=temp_path)
     except Exception as e:
-        raise HTTPException(404, f"Clip nahi mili B2 pe: {e}")
+        raise HTTPException(404, f"Clip not found on B2: {e}")
     media = None
     try:
         youtube = build("youtube", "v3", credentials=creds)
@@ -712,7 +714,7 @@ def process_video(job_id: str, req: ClipRequest, user_id: str):
         update(job_id, "AI detecting viral moments...", 45)
         min_sec, max_sec, target_sec = LENGTH_MAP.get(req.clip_length, (30, 60, 48))
         moments = detect_viral_moments(transcript, min_sec, max_sec, target_sec)
-        if not moments: raise Exception("No viral moments detected. Longer video try karo.")
+        if not moments: raise Exception("No viral moments detected. Please try a longer video.")
         moments = [enforce_duration(m, min_sec, max_sec, target_sec) for m in moments]
 
         clip_data = []
@@ -759,7 +761,7 @@ def _extract_video_id(youtube_url: str) -> str:
     for pattern in patterns:
         match = re.search(pattern, youtube_url)
         if match: return match.group(1)
-    raise Exception(f"YouTube video ID nahi mila URL se: {youtube_url}")
+    raise Exception(f"Could not find a YouTube video ID in the URL: {youtube_url}")
 
 def _try_ytdlp_ios(youtube_url, out_dir):
     cookies_file = str(COOKIES_PATH) if COOKIES_PATH.exists() else None
@@ -793,7 +795,7 @@ def _try_invidious(youtube_url, out_dir):
             if res.status_code != 200:
                 last_error = f"{server} returned {res.status_code}"; continue
             data = res.json()
-            # Combined streams pehle try karo
+            # Try combined streams first
             fmt_streams = data.get("formatStreams", [])
             if fmt_streams:
                 fmt_streams.sort(key=lambda x: int(x.get("resolution","0p").replace("p","") or 0), reverse=True)
@@ -802,7 +804,7 @@ def _try_invidious(youtube_url, out_dir):
         except Exception as e:
             last_error = str(e); print(f"[Invidious] {server} failed: {e}"); continue
     if not stream_url:
-        raise Exception(f"Invidious: Koi server kaam nahi kiya. Last: {last_error}")
+        raise Exception(f"Invidious: no server worked. Last: {last_error}")
     out_path = str(out_dir / "video.mp4")
     ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15"
     r = subprocess.run(["ffmpeg","-y","-user_agent",ua,"-i",stream_url,"-c","copy",out_path],
@@ -836,7 +838,7 @@ def _try_piped(youtube_url, out_dir):
         except Exception as e:
             last_error = str(e); print(f"[Piped] {server} failed: {e}"); continue
     if not stream_url:
-        raise Exception(f"Piped: Koi bhi server kaam nahi kiya. Last error: {last_error}")
+        raise Exception(f"Piped: no server worked. Last error: {last_error}")
     out_path = str(out_dir / "video.mp4")
     ua = "Mozilla/5.0 (iPhone; CPU iPhone OS 14_0 like Mac OS X) AppleWebKit/605.1.15"
     if audio_url:
@@ -870,14 +872,14 @@ def download_full_video(youtube_url, out_dir):
             except Exception as e3:
                 errors.append(f"Piped: {str(e3)[:200]}")
                 print(f"[Download] Method 3 failed: {e3}")
-                raise Exception("Video download nahi hua. Teeno methods fail:\n" +
+                raise Exception("Video download failed. All three methods failed:\n" +
                                 "\n".join(f"• {err}" for err in errors) +
-                                "\n\nYouTube URL sahi hai? Private/restricted video toh nahi?")
+                                "\n\nIs the YouTube URL correct? Make sure the video is not private or restricted.")
 
     video_path = next(
         (str(f) for f in out_dir.iterdir() if f.suffix in (".mp4",".mkv",".webm") and "audio" not in f.name), None)
     if not video_path:
-        raise Exception("Video download failed — file nahi mili output folder mein")
+        raise Exception("Video download failed — file not found in the output folder")
     audio_path = str(out_dir / "audio.mp3")
     r = subprocess.run(["ffmpeg","-y","-i",video_path,"-vn","-acodec","mp3","-ar","16000","-ab","64k","-ac","1",audio_path],
                        capture_output=True, text=True)
@@ -989,7 +991,7 @@ def build_synced_drawtexts(segments, font_path):
 # ---- Stylish captions (ASS): white text + shadow, yellow keyword, pop animation ----
 FONTS_DIR = BASE_DIR / "fonts"
 CAP_FONT  = "Poppins ExtraBold"
-CAP_Y     = 1010   # caption ki vertical position (4:3 video ke neeche)
+CAP_Y     = 1010   # vertical position of the caption (below the 4:3 video)
 _STOP = {"main","mai","mein","hai","hain","hu","hun","ho","hoga","tha","thi","the","ka","ki","ke","ko","se","ne",
          "par","pe","aur","to","ye","yeh","wo","woh","jaa","raha","rahi","rahe","kar","karo","bhi","nahi","na",
          "is","us","ek","and","the","a","an","of","in","on","it","you","i","we","are","was",
