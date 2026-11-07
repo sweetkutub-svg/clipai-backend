@@ -70,3 +70,11 @@ Kam/zyada karna ho to `.env` me `ZOOM_FACTOR` badal (`1.0` = zoom band, `1.15` =
 - YouTube download fail -> `cookies.txt` purani ho gayi hogi, nayi export karke backend folder me replace kar.
 - Login ke baad wapas nahi aa raha -> upar wale redirect URL (Google + Supabase) dubara check kar.
 - `.env` aur `cookies.txt` kabhi GitHub par push mat karna (`.gitignore` me already hain).
+
+- ## License
+MIT License. See the `LICENSE` file.
+
+## Author
+SK Kutubuddin
+Portfolio: https://codewithkutub.online
+Email: codewithkutub@gmail.com
