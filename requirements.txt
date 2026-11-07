@@ -1,0 +1,26 @@
+# API Framework
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+python-multipart==0.0.9
+pydantic==2.10.6
+
+#Environment
+python-dotenv
+
+# Media
+yt-dlp[default]
+
+# AI / Transcription
+groq
+
+# HTTP
+requests>=2.32.2
+
+# Google APIs
+google-api-python-client
+google-auth-oauthlib
+google-auth-httplib2
+
+# Database & Storage
+supabase
+boto3

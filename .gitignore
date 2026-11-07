@@ -1,0 +1,12 @@
+.env
+__pycache__/
+temp/
+outputs/
+cookies.txt
+tokens.json
+
+venv/
+.env
+__pycache__/
+temp/
+outputs/
