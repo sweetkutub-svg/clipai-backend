@@ -1,80 +1,162 @@
-# ClipAI Backend (FastAPI)
+# ClipAI Backend
 
-## 1. One-time setup
-1. **Supabase** → SQL Editor → run `schema.sql`. Authentication → Providers → enable Google.
-   Authentication → URL Configuration → Site URL = your Vercel URL (add `http://localhost:3000` to Redirect URLs too).
-2. **Google Cloud** (YouTube Data API v3 enabled) → OAuth client (Web). Authorized redirect URI:
-   `https://<YOUR-BACKEND-URL>/auth/youtube/callback`
-3. **Backblaze B2** bucket (private) + application key.
-4. Keys: Groq, OpenRouter.
+ClipAI turns a long YouTube video into ready-to-post vertical Shorts. Paste a link, and the backend finds the best moments, cuts them into 9:16 clips with styled captions, and publishes them to YouTube Shorts and Facebook Reels.
 
-## 2. Free hosting — Hugging Face Spaces (recommended: 2 vCPU / 16 GB RAM free)
-1. huggingface.co → New Space → SDK **Docker** → Blank → Public.
-2. Upload all files of this folder (or `git push` to the Space repo).
-3. Space → Settings → **Variables and secrets**: add every key from `.env.example` as a *Secret*
-   (`BACKEND_URL` = `https://<user>-<space>.hf.space`, `FRONTEND_URL` = your Vercel URL).
-4. Backend URL = `https://<user>-<space>.hf.space`. Put the same in Google redirect URI + Vercel `REACT_APP_API_URL`.
-Note: free Spaces sleep after ~48h of no traffic (wakes on first request).
+## Features
 
-Alternative: Render free web service (Docker). Only 512 MB RAM / slow CPU, 15-min idle sleep — works but slower.
+- Downloads a YouTube video and transcribes it with Whisper (via Groq)
+- Picks the most engaging moments using an LLM (via OpenRouter)
+- Cuts clips and reformats them to 9:16 with a 4:3 video window, animated captions and a highlighted keyword
+- Supports English, Hindi, Hinglish and Bengali
+- Stores clips in Backblaze B2 and serves them through signed URLs
+- Publishes to YouTube Shorts and Facebook Page Reels, individually or to all connected platforms in one click
+- Google sign-in through Supabase, with a per-user clip limit
 
-## 3. YouTube download note
-YouTube often blocks datacenter IPs. Set `YT_COOKIES` secret with the content of a Netscape `cookies.txt`
-exported from a **throw-away Google account** (never your main one). Refresh it if downloads start failing.
+## How it works
 
-## Local run (apne computer par chalane ka tarika)
+1. `yt-dlp` downloads the video and extracts the audio.
+2. Groq Whisper transcribes the audio.
+3. An LLM selects viral moments and writes captions.
+4. `ffmpeg` cuts each clip, applies the 9:16 layout and burns in captions.
+5. Clips are uploaded to Backblaze B2 and recorded in Supabase.
+6. On request, clips are published to YouTube and/or Facebook.
 
-### Zaroori cheezein
-- **Python 3.10+** (3.11 best)
-- **ffmpeg** (terminal me `ffmpeg -version` chalna chahiye)
-  - Windows: `winget install ffmpeg` (ya https://ffmpeg.org se download karke PATH me daal)
-  - Mac: `brew install ffmpeg`
-  - Linux: `sudo apt install ffmpeg fonts-dejavu-core`
-- **Node.js** (yt-dlp YouTube ke liye use karta hai) + frontend ke liye bhi chahiye
+## Tech stack
 
-### Backend
+FastAPI, yt-dlp, ffmpeg, Groq (Whisper), OpenRouter, Supabase (Auth and Postgres), Backblaze B2 (S3-compatible), YouTube Data API v3, Meta Graph API.
+
+## Prerequisites
+
+- Python 3.10 or newer (3.11+ recommended)
+- ffmpeg available on your `PATH` (built with libass for captions)
+- Node.js (used by yt-dlp to solve YouTube challenges)
+- Accounts and keys for: Supabase, Groq, OpenRouter, Backblaze B2, Google Cloud
+- Optional: a Meta developer app (for Facebook publishing)
+
+## Configuration
+
+Copy `.env.example` to `.env` and fill in the values.
+
+| Variable | Required | Description |
+|---|---|---|
+| `GROQ_API_KEY` | Yes | Groq API key (transcription) |
+| `OPENROUTER_KEY` | Yes | OpenRouter API key (moment selection and titles) |
+| `SUPABASE_URL` | Yes | Supabase project URL |
+| `SUPABASE_SERVICE_KEY` | Yes | Supabase `service_role` key (server-side only) |
+| `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | Yes | OAuth client for YouTube uploads |
+| `B2_KEY_ID` / `B2_APP_KEY` | Yes | Backblaze B2 application key |
+| `B2_BUCKET_NAME` | Yes | Private B2 bucket name |
+| `B2_ENDPOINT` | Yes | B2 S3 endpoint, e.g. `https://s3.us-west-004.backblazeb2.com` |
+| `BACKEND_URL` | Yes | Public URL of this backend (`http://localhost:8000` locally) |
+| `FRONTEND_URL` | Yes | Public URL of the frontend (`http://localhost:3000` locally) |
+| `YT_COOKIES` | Recommended | Contents of a Netscape `cookies.txt` (see below) |
+| `FACEBOOK_APP_ID` / `FACEBOOK_APP_SECRET` | Optional | Enables Facebook Reels publishing |
+| `ZOOM_FACTOR` | Optional | Extra zoom on the video window (`1.0` = none) |
+| `BG_STYLE` | Optional | Background around the video: `dark` (default) or `blur` |
+
+Never commit `.env` or `cookies.txt`. Both are listed in `.gitignore`.
+
+## Database setup
+
+In the Supabase SQL Editor, run `schema.sql`, then run the following if it is not already part of your schema:
+
+```sql
+create table if not exists public.fb_tokens (
+  user_id uuid primary key,
+  page_id text,
+  page_name text,
+  page_picture text,
+  page_token text,
+  updated_at timestamptz default now()
+);
+alter table public.fb_tokens enable row level security;
+grant select, insert, update, delete on public.fb_tokens to service_role;
+
+alter table public.clips
+  add column if not exists uploaded_to jsonb not null default '[]'::jsonb;
+```
+
+Then, in Supabase, enable the Google provider under Authentication, Providers. Under Authentication, URL Configuration, set the Site URL to your frontend URL and add `http://localhost:3000` to the Redirect URLs.
+
+## Run locally
+
 ```bash
-cd clipai-backend-main
-python -m venv venv
-# Windows:  venv\Scripts\activate
-# Mac/Linux: source venv/bin/activate
-pip install -r requirements.txt
+git clone https://github.com/sweetkutub-svg/clipai-backend.git
+cd clipai-backend
 
-# .env file already bani hai - khali keys (GROQ_API_KEY, OPENROUTER_KEY,
-# SUPABASE_SERVICE_KEY, GOOGLE_CLIENT_ID/SECRET, B2_KEY_ID/B2_APP_KEY) bhar le
+python -m venv venv
+# Windows: venv\Scripts\activate
+# macOS/Linux: source venv/bin/activate
+
+pip install -r requirements.txt
+cp .env.example .env        # then edit .env
 uvicorn main:app --reload --port 8000
 ```
-Check: browser me http://localhost:8000/docs khulna chahiye.
 
-### Frontend (alag terminal me)
+Open http://localhost:8000/docs to confirm the API is running. The matching frontend runs on http://localhost:3000.
+
+## Run with Docker
+
 ```bash
-cd clipai-frontend-main
-npm install
-npm start          # http://localhost:3000
+docker build -t clipai-backend .
+docker run -p 7860:7860 --env-file .env clipai-backend
 ```
-Frontend ki `.env` me `REACT_APP_API_URL=http://localhost:8000` hai.
 
-### Local ke liye ek baar ye settings check kar le
-1. **Google Cloud -> OAuth client -> Authorized redirect URIs** me ye add kar:
-   `http://localhost:8000/auth/youtube/callback`
-2. **Supabase -> Authentication -> URL Configuration -> Redirect URLs** me `http://localhost:3000` add kar.
-3. `.env` me `BACKEND_URL=http://localhost:8000` aur `FRONTEND_URL=http://localhost:3000` rehna chahiye.
-4. `.env` badalne ke baad backend dobara start kar (frontend ke liye `npm start` dobara).
+The container listens on `$PORT` (default `7860`).
 
-### Video zoom
-16:9 video ko 9:16 shorts me convert karne ke baad main video thora zoom-in hota hai.
-Kam/zyada karna ho to `.env` me `ZOOM_FACTOR` badal (`1.0` = zoom band, `1.15` = default, `1.3` = zyada).
+## Deployment
 
-### Dikkat aaye to
-- `ffmpeg not found` -> ffmpeg install karke terminal restart kar.
-- YouTube download fail -> `cookies.txt` purani ho gayi hogi, nayi export karke backend folder me replace kar.
-- Login ke baad wapas nahi aa raha -> upar wale redirect URL (Google + Supabase) dubara check kar.
-- `.env` aur `cookies.txt` kabhi GitHub par push mat karna (`.gitignore` me already hain).
+The included `Dockerfile` works on any platform that runs Docker containers. Set every variable from the table above in the platform's environment settings, using the live URLs for `BACKEND_URL` and `FRONTEND_URL`.
 
-- ## License
-MIT License. See the `LICENSE` file.
+Video encoding is CPU and memory intensive. Very small instances (for example 512 MB RAM or a fraction of a CPU) may be slow or run out of memory. For two or more users processing videos at the same time, at least 1 GB of RAM and 1 vCPU is recommended.
+
+## Connecting platforms
+
+### YouTube
+1. In Google Cloud, enable **YouTube Data API v3** and create an OAuth client of type *Web application*.
+2. Add this authorized redirect URI: `<BACKEND_URL>/auth/youtube/callback`.
+3. While the consent screen is in *Testing* mode, add your Google account as a test user.
+
+### Facebook (optional)
+1. Create a Meta app and add the **Manage everything on your Page** use case.
+2. Add the permissions `pages_show_list`, `pages_read_engagement` and `pages_manage_posts`.
+3. Add this valid OAuth redirect URI: `<BACKEND_URL>/auth/facebook/callback`.
+4. Facebook publishing targets a Facebook **Page**, not a personal profile. Reels must be 3 to 60 seconds long, so use the 30–60 s clip length.
+5. While the app is in development mode, only app admins and testers can connect.
+
+## YouTube download cookies
+
+YouTube often blocks downloads from data center IP addresses. Export a Netscape `cookies.txt` from a **throwaway Google account** (never your main account) using a private window and a cookie export extension, and provide it in one of two ways:
+
+- Locally: save it as `cookies.txt` next to `main.py`.
+- On a host: paste its contents into the `YT_COOKIES` environment variable.
+
+Refresh the cookies if downloads start failing with a "Sign in to confirm you're not a bot" error.
+
+## Captions and fonts
+
+Captions are rendered with libass using the fonts in `fonts/` (Poppins ExtraBold for Latin and Devanagari, Hind Siliguri Bold for Bengali). Both fonts are licensed under the SIL Open Font License.
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| `ffmpeg not found` | Install ffmpeg and restart the terminal |
+| "Sign in to confirm you're not a bot" | Export fresh YouTube cookies |
+| Login redirects back with an error | Check the redirect URLs in Google Cloud, Meta and Supabase |
+| Facebook upload rejected | Make sure the clip is 60 seconds or shorter and the Page is connected |
+| `permission denied for table` in Supabase | Run the SQL in "Database setup", including the `grant` line |
+
+## Disclaimer
+
+This project is intended for processing content you own or have permission to use. You are responsible for complying with YouTube's Terms of Service, Meta's platform terms and applicable copyright law.
+
+## License
+
+MIT License. See the [LICENSE](LICENSE) file.
 
 ## Author
+
 SK Kutubuddin
 Portfolio: https://codewithkutub.online
 Email: codewithkutub@gmail.com
