@@ -37,6 +37,10 @@ if shutil.which("ffmpeg") is None:
 
 # Cookies setup (optional, from YT_COOKIES env var)
 yt_cookies_content = os.getenv("YT_COOKIES")
+_b64 = os.getenv("YT_COOKIES_B64")
+if _b64 and not yt_cookies_content:
+    try: yt_cookies_content = base64.b64decode(_b64).decode("utf-8").replace("\r\n", "\n")
+    except Exception as _e: print(f"[Cookie] YT_COOKIES_B64 is invalid: {_e}")
 COOKIES_PATH = Path(__file__).parent / "cookies.txt"
 if COOKIES_PATH.exists() and not yt_cookies_content:
     print("[Cookie] cookies.txt found")
