@@ -472,6 +472,7 @@ def upload_to_facebook_route(req: UploadRequest, authorization: Optional[str] = 
     user = require_user(authorization)
     fb = load_fb(user.id)
     if not fb: raise HTTPException(401, "Please connect Facebook first!")
+    check_clip_owner(user, req)
     temp_path = str(TEMP_DIR / f"fbup_{uuid.uuid4()}.mp4")
     try: b2.download_file(Bucket=B2_BUCKET_NAME, Key=req.b2_key, Filename=temp_path)
     except Exception as e: raise HTTPException(404, f"Clip not found on B2: {e}")
@@ -533,6 +534,11 @@ def upload_to_all_route(req: UploadRequest, authorization: Optional[str] = Heade
         except Exception as e: print(f"[Upload] DB delete failed: {e}")
     return {"success": ok_all, "deleted": any(isinstance(r, dict) and r.get("deleted") for r in results.values()), "results": results}
 
+def check_clip_owner(user, req):
+    """Make sure this clip row and storage key belong to the logged-in user."""
+    r = supabase.table("clips").select("id").eq("id", req.clip_db_id).eq("user_id", user.id).eq("b2_key", req.b2_key).execute()
+    if not r.data: raise HTTPException(404, "Clip not found!")
+
 def finish_clip(user_id, req, platform):
     """Mark the platform as 'uploaded'; delete the clip only once it is uploaded to every connected platform."""
     try:
@@ -575,6 +581,7 @@ def upload_to_youtube_route(req: UploadRequest, authorization: Optional[str] = H
     user  = require_user(authorization)
     creds = get_yt_credentials(user.id)
     if not creds: raise HTTPException(401, "Please connect YouTube first!")
+    check_clip_owner(user, req)
     temp_path = str(TEMP_DIR / f"upload_{uuid.uuid4()}.mp4")
     try:
         b2.download_file(Bucket=B2_BUCKET_NAME, Key=req.b2_key, Filename=temp_path)
