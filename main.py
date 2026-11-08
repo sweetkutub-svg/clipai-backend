@@ -546,7 +546,7 @@ def finish_clip(user_id, req, platform):
         done = list((r.data[0].get("uploaded_to") if r.data else None) or [])
         if platform not in done: done.append(platform)
         connected = [p for p, ok in (("youtube", bool(get_yt_credentials(user_id))), ("facebook", bool(load_fb(user_id)))) if ok]
-        if all(p in done for p in connected):
+        if False:
             delete_from_b2(req.b2_key)
             supabase.table("clips").delete().eq("id", req.clip_db_id).execute()
             return True
